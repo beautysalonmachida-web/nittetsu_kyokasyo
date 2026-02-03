@@ -1,0 +1,79 @@
+function kokyaku() {
+  // スプレッドシートのURLを指定
+  const sheetUrl = 'https://docs.google.com/spreadsheets/d/19kPEpjWfcdgojbE49fAV1fcdeSoqlgBYt0VsemmUxVI/edit';
+  const ss = SpreadsheetApp.openByUrl(sheetUrl);
+
+  // --- 1. 送信先のメールアドレスを取得 ---
+  const mailSettingsSheet = ss.getSheetByName('メール設定');
+  if (!mailSettingsSheet) {
+    Logger.log('「メール設定」シートが見つかりません。処理を中断します。');
+    return;
+  }
+  // B列の2行目から最終行までのアドレスを取得
+  const emailAddresses = mailSettingsSheet.getRange('B2:B' + mailSettingsSheet.getLastRow()).getValues();
+  // 1次元配列に変換し、空のセルを除外してカンマ区切りの文字列にする
+  const toAddresses = emailAddresses.flat().filter(address => address !== '').join(',');
+
+  // 送信先アドレスがない場合は処理を中断
+  if (!toAddresses) {
+    Logger.log('送信先のメールアドレスが「メール設定」シートに見つかりません。');
+    return;
+  }
+
+  // --- 2. メールで送信するデータを抽出 ---
+  const permitSheet = ss.getSheetByName('許可証');
+  if (!permitSheet) {
+    Logger.log('「許可証」シートが見つかりません。処理を中断します。');
+    return;
+  }
+  
+  // シートの全データを取得（1行目はヘッダーと仮定）
+  const data = permitSheet.getDataRange().getValues();
+  
+  // 今日の日付から計算
+  const today = new Date();
+  const twoMonthsLater = new Date();
+  twoMonthsLater.setMonth(today.getMonth() + 2);
+
+  let emailBody = '以下の許可書の有効期限が過ぎています:\n\n';
+  let count = 0;
+
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    const permitDate = new Date(row[4]); // E列: 許可有効年月日 (インデックス4)
+    const updateStatus = row[6];         // G列: 更新 (インデックス6)
+    const meisyou = row[0];
+
+    // --- 3. 送信条件を修正 ---
+    // 条件: 許可有効年月日が今日よりも古く、かつ更新ステータスが「申請中」ではない
+    if (permitDate <= today && updateStatus !== '申請中'&& meisyou === '産業廃棄物処分業許可証【最終処分業') {
+      const formattedPermitDate = Utilities.formatDate(permitDate, Session.getScriptTimeZone(), 'yyyy/M/d');
+
+      emailBody += '許可書名称: ' + row[0] + '\n'  // A列: 許可書名称
+                + '許可地: ' + row[1] + '\n'        // B列: 許可地
+                + '許可番号: ' + row[2] + '\n'      // C列: 許可番号
+                + '許可有効年月日: ' + formattedPermitDate + '\n'
+                + '備考: ' + row[5] + '\n\n';      // F列: 備考
+      count++;
+    }
+  }
+
+  // 該当するデータが1件もない場合、処理を中断
+  if (count === 0) {
+    Logger.log('該当するデータはありません。処理を中断し、メールは送信されません。');
+    return;
+  }
+
+  // --- 4. メールの作成と送信 ---
+  // 本文の最後にリンクを追加
+  emailBody += '\n更新はこちらのアプリから\n';
+  emailBody += 'https://www.appsheet.com/start/20bd829d-6f34-4f48-95c1-25c1bbb4a8e8\n\n';
+  emailBody += 'スマホの場合はこちら\n';
+  emailBody += 'https://www.appsheet.com/newshortcut/20bd829d-6f34-4f48-95c1-25c1bbb4a8e8\n';
+
+  const subject = '【要確認】顧客の許可書有効期限のお知らせ';
+  
+  // 取得した全てのアドレスにメールを送信
+  GmailApp.sendEmail(toAddresses, subject, emailBody);
+  Logger.log('メールを ' + toAddresses + ' に送信しました。');
+}
