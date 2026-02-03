@@ -1,0 +1,157 @@
+function checkCertificateDeadlines() {
+  // --- 1. シートと列の定義 ---
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const permitSheet = ss.getSheetByName('許可証');
+  const certSheet = ss.getSheetByName('修了書');
+  const settingSheet = ss.getSheetByName('メール設定');
+
+  const PERMIT_COLS = { NAME: 1, LOCATION: 2, NUMBER: 3, EXPIRY_DATE: 5, NOTIFICATION: 10 };
+  const CERT_COLS = { NAME: 1, EXPIRY_DATE: 3 };
+
+  if (!permitSheet || !certSheet || !settingSheet) {
+    Logger.log('必要なシート（許可証, 修了書, メール設定）が見つかりません。');
+    return;
+  }
+
+  // --- 2. データ取得と事前準備 ---
+  const permitData = permitSheet.getRange(2, 1, permitSheet.getLastRow() - 1, PERMIT_COLS.NOTIFICATION).getValues();
+  const certData = certSheet.getRange(2, 1, certSheet.getLastRow() - 1, CERT_COLS.EXPIRY_DATE).getValues();
+
+  const certMap = new Map();
+  certData.forEach((row) => {
+    const name = row[CERT_COLS.NAME - 1];
+    if (name) { certMap.set(name, { expiryDate: row[CERT_COLS.EXPIRY_DATE - 1] }); }
+  });
+
+  // --- 3. 条件判定（一次選考）---
+  const initialMatches = [];
+  
+  // --- ここから追加 ---
+  // 日付の条件を定義
+  const today = new Date();
+  today.setHours(0, 0, 0, 0); // 時間をリセットして日付のみで比較
+  
+  const sixMonthsFromToday = new Date();
+  sixMonthsFromToday.setMonth(today.getMonth() + 6);
+  // --- ここまで追加 ---
+
+  permitData.forEach((permitRow, index) => {
+    const noticeStatus = permitRow[PERMIT_COLS.NOTIFICATION - 1];
+    const permitName = permitRow[PERMIT_COLS.NAME - 1]; // ※ バグ修正: meisyou -> permitName
+    if (noticeStatus === '半年前通知済' || permitName === '産業廃棄物処分業許可証【最終処分業') { return; }
+
+    if (permitName && certMap.has(permitName)) {
+      const certInfo = certMap.get(permitName);
+      const permitExpiryDate = new Date(permitRow[PERMIT_COLS.EXPIRY_DATE - 1]);
+      const certExpiryDate = new Date(certInfo.expiryDate);
+
+      if (isNaN(permitExpiryDate.getTime()) || isNaN(certExpiryDate.getTime())) { return; }
+      
+      const threeMonthsBeforePermitExpiry = new Date(permitExpiryDate);
+      threeMonthsBeforePermitExpiry.setMonth(threeMonthsBeforePermitExpiry.getMonth() - 3);
+      
+      // --- ここから修正 ---
+      // ★ 条件判定：
+      // 1. 修了証の有効期限が、許可証期限の3ヶ月前より古いか（従来条件）
+      // 2. かつ、許可証の有効期限が今日以降である
+      // 3. かつ、許可証の有効期限が今日から半年以内である（新規条件）
+      if (certExpiryDate < threeMonthsBeforePermitExpiry && 
+          permitExpiryDate >= today && 
+          permitExpiryDate <= sixMonthsFromToday) {
+        // --- ここまで修正 ---
+        initialMatches.push({
+          permit: {
+            name: permitName,
+            location: permitRow[PERMIT_COLS.LOCATION - 1],
+            number: permitRow[PERMIT_COLS.NUMBER - 1],
+            expiryDate: permitExpiryDate,
+            rowIndex: index + 2
+          },
+          certificate: { expiryDate: certExpiryDate }
+        });
+      }
+    }
+  });
+
+  // --- 4. グループ化と代表の選出（二次選考）---
+  // (変更なし)
+  if (initialMatches.length === 0) {
+    Logger.log('通知対象のデータはありません。');
+    return;
+  }
+  // ( ... 以降のコードは変更ありません ... )
+  const groupedByCert = new Map();
+  initialMatches.forEach(item => {
+    const certKey = item.permit.name + '|' + item.certificate.expiryDate.toISOString();
+    if (!groupedByCert.has(certKey)) {
+      groupedByCert.set(certKey, {
+        certInfo: item.certificate,
+        permitName: item.permit.name,
+        permits: [] 
+      });
+    }
+    groupedByCert.get(certKey).permits.push(item.permit);
+  });
+  
+  const finalNotifications = [];
+  const todayForFilter = new Date(); // 4.のtodayはそのまま使用
+  todayForFilter.setHours(0,0,0,0);
+
+  groupedByCert.forEach(group => {
+    let closestPermit = group.permits
+      .filter(p => p.expiryDate >= todayForFilter)
+      .sort((a, b) => a.expiryDate - b.expiryDate)[0];
+
+    if (!closestPermit) {
+      closestPermit = group.permits[0];
+    }
+    
+    finalNotifications.push({
+      representativePermit: closestPermit,
+      certInfo: group.certInfo,
+      permitName: group.permitName
+    });
+  });
+
+  // --- 5. メールの作成と送信 ---
+  // (変更なし)
+  const emailAddresses = settingSheet.getRange('B2:B' + settingSheet.getLastRow()).getValues().flat().filter(String);
+  if (emailAddresses.length === 0) {
+    Logger.log('送信先アドレスがありません。');
+    return;
+  }
+
+  const subject = '【要確認】修了証有効期限のお知らせ';
+  let emailBody = '以下の許可書の更新までに、関連する修了証の更新が必要です。\n\n';
+  const timeZone = Session.getScriptTimeZone();
+
+  finalNotifications.forEach(item => {
+    emailBody += '----------------------------------------\n';
+    emailBody += '■要更新の修了証\n';
+    emailBody += `・許可書名称: ${item.permitName}\n`;
+    emailBody += `・修了証有効年月日: ${Utilities.formatDate(item.certInfo.expiryDate, timeZone, 'yyyy/MM/dd')}\n\n`;
+    emailBody += '■代表許可書\n';
+    emailBody += `・許可地: ${item.representativePermit.location}\n`;
+    emailBody += `・許可番号: ${item.representativePermit.number}\n`;
+    emailBody += `・許可有効年月日: ${Utilities.formatDate(item.representativePermit.expiryDate, timeZone, 'yyyy/MM/dd')}\n\n`;
+  });
+  
+  emailBody += '----------------------------------------\n\n';
+  emailBody += '更新はこちらのアプリから\nhttps://www.appsheet.com/start/20bd829d-6f34-4f48-95c1-25c1bbb4a8e8\n\n';
+  emailBody += 'スマホの場合はこちら\nhttps://www.appsheet.com/newshortcut/20bd829d-6f34-4f48-95c1-25c1bbb4a8e8\n';
+
+  const recipients = emailAddresses.join(',');
+  MailApp.sendEmail(recipients, subject, emailBody);
+  Logger.log(`メールを ${recipients} に送信しました。`);
+
+  // --- 6. シートの更新 ---
+  // (変更なし)
+  let updatedRowCount = 0;
+  groupedByCert.forEach(group => {
+    group.permits.forEach(permitToUpdate => {
+      permitSheet.getRange(permitToUpdate.rowIndex, PERMIT_COLS.NOTIFICATION).setValue('半年前通知済');
+      updatedRowCount++;
+    });
+  });
+  Logger.log(`${updatedRowCount}件のステータスを「半年前通知済」に更新しました。`);
+}
