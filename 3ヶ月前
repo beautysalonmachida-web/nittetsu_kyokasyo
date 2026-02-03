@@ -1,0 +1,87 @@
+function send3MonthNotification() {
+  // --- 1. スプレッドシートとシートの情報を取得 ---
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const permitSheet = ss.getSheetByName('許可証');
+  const settingSheet = ss.getSheetByName('メール設定');
+
+  if (!permitSheet || !settingSheet) {
+    Logger.log('「許可証」または「メール設定」シートが見つかりません。処理を中断します。');
+    return;
+  }
+
+  // --- 2. 日付の準備 ---
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  const threeMonthsLater = new Date();
+  threeMonthsLater.setMonth(threeMonthsLater.getMonth() + 3);
+  threeMonthsLater.setHours(0, 0, 0, 0);
+
+  // --- 3. データ取得と条件判定 ---
+  const dataRange = permitSheet.getRange(2, 1, permitSheet.getLastRow() - 1, 10);
+  const data = dataRange.getValues();
+
+  const expiringPermits = [];
+
+  for (let i = 0; i < data.length; i++) {
+    const row = data[i];
+    
+    // E列の値を、型に関わらず強制的に日付オブジェクトに変換
+    const permitDate = new Date(row[4]); 
+    
+    // 変換した結果が、有効な日付でなければスキップ
+    if (isNaN(permitDate.getTime())) {
+      continue;
+    }
+
+    const updateStatus = row[6]; // G列
+    const noticeStatus = row[9]; // J列
+    const meisyou = row[0];
+
+    // 条件判定
+    if (permitDate >= today && permitDate <= threeMonthsLater && updateStatus !== '申請中' && meisyou !== '産業廃棄物処分業許可証【最終処分業'
+    && noticeStatus !== '3ヶ月通知済み')
+    
+     {
+       expiringPermits.push({
+         rowIndex: i + 2,
+         details: row
+       });
+    }
+  }
+
+  // --- 4. メールの作成と送信 ---
+  if (expiringPermits.length === 0) {
+    // このログは、実行結果の確認に便利なため残しておきます
+    Logger.log('通知対象のデータはありません。');
+    return;
+  }
+  
+  const emailAddresses = settingSheet.getRange('B2:B' + settingSheet.getLastRow()).getValues().flat().filter(String);
+  if(emailAddresses.length === 0) {
+    Logger.log('送信先アドレスがありません。処理を中断します。');
+    return;
+  }
+
+  const subject = '【要確認】許可書有効期限のお知らせ';
+  let emailBody = '以下の許可書の有効期限が3ヶ月以内です:\n\n';
+  const timeZone = Session.getScriptTimeZone();
+
+  expiringPermits.forEach(permit => {
+    const details = permit.details;
+    const formattedPermitDate = Utilities.formatDate(new Date(details[4]), timeZone, 'yyyy/MM/dd');
+    emailBody += `許可書名称: ${details[0]}\n許可地: ${details[1]}\n許可番号: ${details[2]}\n許可有効年月日: ${formattedPermitDate}\n備考: ${details[5]}\n\n`;
+  });
+
+  emailBody += '\n\n更新はこちらのアプリから\nhttps://www.appsheet.com/start/20bd829d-6f34-4f48-95c1-25c1bbb4a8e8\n\nスマホの場合はこちら\nhttps://www.appsheet.com/newshortcut/20bd829d-6f34-4f48-95c1-25c1bbb4a8e8\n';
+  
+  const recipients = emailAddresses.join(',');
+  MailApp.sendEmail(recipients, subject, emailBody);
+  Logger.log('メールを ' + recipients + ' に送信しました。');
+
+  // --- 5. シートの更新 ---
+  expiringPermits.forEach(permit => {
+    permitSheet.getRange(permit.rowIndex, 10).setValue('3ヶ月通知済み');
+  });
+  Logger.log(expiringPermits.length + '件のステータスを「3ヶ月通知済み」に更新しました。');
+}
